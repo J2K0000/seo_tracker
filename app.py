@@ -19,7 +19,6 @@ load_dotenv()
 load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 # Configuration
-LOCATION_CODE = int(os.getenv("DEFAULT_LOCATION_CODE", 2250))  # 2250 = France
 LANGUAGE_CODE = os.getenv("DEFAULT_LANGUAGE_CODE", "fr")
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 10))
 
@@ -50,14 +49,14 @@ def extract_domain(url_or_domain):
     return domain
 
 
-def get_search_volumes(keywords, headers):
+def get_search_volumes(keywords, headers, location_code):
     """Récupère les volumes de recherche pour une liste de mots-clés."""
     volumes = {kw: None for kw in keywords}
 
     payload = [
         {
             "keywords": keywords,
-            "location_code": LOCATION_CODE,
+            "location_code": location_code,
             "language_code": LANGUAGE_CODE,
         }
     ]
@@ -86,12 +85,12 @@ def get_search_volumes(keywords, headers):
     return volumes
 
 
-def get_keyword_positions_multi(keyword, target_domains, headers):
+def get_keyword_positions_multi(keyword, target_domains, headers, location_code):
     """Recherche les positions de plusieurs domaines pour un mot-clé donné."""
     payload = [
         {
             "keyword": keyword,
-            "location_code": LOCATION_CODE,
+            "location_code": location_code,
             "language_code": LANGUAGE_CODE,
             "depth": 100,
         }
@@ -126,7 +125,7 @@ def get_keyword_positions_multi(keyword, target_domains, headers):
         return keyword, results
 
 
-def get_positions_parallel_multi(keywords, target_domains, headers, progress_bar, status_text):
+def get_positions_parallel_multi(keywords, target_domains, headers, location_code, progress_bar, status_text):
     """Recherche les positions en parallèle pour plusieurs domaines."""
     results = {}
     completed = 0
@@ -134,7 +133,7 @@ def get_positions_parallel_multi(keywords, target_domains, headers, progress_bar
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
-            executor.submit(get_keyword_positions_multi, kw, target_domains, headers): kw
+            executor.submit(get_keyword_positions_multi, kw, target_domains, headers, location_code): kw
             for kw in keywords
         }
 
@@ -188,21 +187,113 @@ st.set_page_config(
 st.title("📊 SEO Tracker Multi-Sites")
 st.markdown("Relevé de positions pour un ou plusieurs sites via DataForSEO API")
 
+# Récupérer les credentials (priorité: Streamlit Secrets > .env)
+def get_credentials():
+    """Récupère les credentials depuis Streamlit Secrets ou .env"""
+    login = None
+    password = None
+
+    # Essayer Streamlit Secrets d'abord (pour déploiement cloud)
+    try:
+        login = st.secrets.get("DATAFORSEO_LOGIN")
+        password = st.secrets.get("DATAFORSEO_PASSWORD")
+    except Exception:
+        pass
+
+    # Sinon, utiliser les variables d'environnement (.env local)
+    if not login:
+        login = os.getenv("DATAFORSEO_LOGIN", "")
+    if not password:
+        password = os.getenv("DATAFORSEO_PASSWORD", "")
+
+    return login, password
+
+default_login, default_password = get_credentials()
+credentials_configured = bool(default_login and default_password)
+
 # Sidebar pour les paramètres
 with st.sidebar:
     st.header("Configuration API")
 
-    # Récupérer les credentials depuis .env ou saisie manuelle
-    default_login = os.getenv("DATAFORSEO_LOGIN", "")
-    default_password = os.getenv("DATAFORSEO_PASSWORD", "")
-
-    api_login = st.text_input("DataForSEO Login", value=default_login, type="default")
-    api_password = st.text_input("DataForSEO Password", value=default_password, type="password")
+    if credentials_configured:
+        st.success("API configurée via Secrets")
+        api_login = default_login
+        api_password = default_password
+    else:
+        st.warning("API non configurée")
+        api_login = st.text_input("DataForSEO Login", type="default")
+        api_password = st.text_input("DataForSEO Password", type="password")
 
     st.divider()
     st.header("Paramètres")
-    location = st.selectbox("Pays", ["France", "Belgique", "Suisse", "Canada"], index=0)
-    location_codes = {"France": 2250, "Belgique": 2056, "Suisse": 2756, "Canada": 2124}
+
+    # Liste complète des pays supportés par DataForSEO
+    location_codes = {
+        # Europe francophone
+        "France": 2250,
+        "Belgique": 2056,
+        "Suisse": 2756,
+        "Luxembourg": 2442,
+        "Monaco": 2492,
+        # Europe
+        "Allemagne": 2276,
+        "Royaume-Uni": 2826,
+        "Espagne": 2724,
+        "Italie": 2380,
+        "Portugal": 2620,
+        "Pays-Bas": 2528,
+        "Autriche": 2040,
+        "Pologne": 2616,
+        "Suède": 2752,
+        "Norvège": 2578,
+        "Danemark": 2208,
+        "Finlande": 2246,
+        "Irlande": 2372,
+        "Grèce": 2300,
+        "République Tchèque": 2203,
+        "Roumanie": 2642,
+        "Hongrie": 2348,
+        # Amérique du Nord
+        "États-Unis": 2840,
+        "Canada": 2124,
+        "Mexique": 2484,
+        # Amérique du Sud
+        "Brésil": 2076,
+        "Argentine": 2032,
+        "Colombie": 2170,
+        "Chili": 2152,
+        "Pérou": 2604,
+        # Asie
+        "Japon": 2392,
+        "Corée du Sud": 2410,
+        "Inde": 2356,
+        "Singapour": 2702,
+        "Hong Kong": 2344,
+        "Taïwan": 2158,
+        "Thaïlande": 2764,
+        "Vietnam": 2704,
+        "Indonésie": 2360,
+        "Malaisie": 2458,
+        "Philippines": 2608,
+        # Océanie
+        "Australie": 2036,
+        "Nouvelle-Zélande": 2554,
+        # Afrique
+        "Afrique du Sud": 2710,
+        "Maroc": 2504,
+        "Algérie": 2012,
+        "Tunisie": 2788,
+        "Égypte": 2818,
+        "Nigeria": 2566,
+        "Kenya": 2404,
+        # Moyen-Orient
+        "Émirats Arabes Unis": 2784,
+        "Arabie Saoudite": 2682,
+        "Israël": 2376,
+        "Turquie": 2792,
+    }
+
+    location = st.selectbox("Pays", list(location_codes.keys()), index=0)
 
 # Layout principal en deux colonnes
 col1, col2 = st.columns(2)
@@ -265,13 +356,16 @@ if st.button("🚀 Lancer l'analyse", type="primary", use_container_width=True):
         progress_bar = st.progress(0)
         status_text = st.empty()
 
+        # Récupérer le code de localisation sélectionné
+        selected_location_code = location_codes[location]
+
         # Récupérer les positions
         status_text.text("Analyse des positions...")
-        positions_dict = get_positions_parallel_multi(keywords, sites, headers, progress_bar, status_text)
+        positions_dict = get_positions_parallel_multi(keywords, sites, headers, selected_location_code, progress_bar, status_text)
 
         # Récupérer les volumes
         status_text.text("Récupération des volumes de recherche...")
-        volumes_dict = get_search_volumes(keywords, headers)
+        volumes_dict = get_search_volumes(keywords, headers, selected_location_code)
 
         progress_bar.progress(100)
         status_text.text("Analyse terminée !")
