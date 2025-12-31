@@ -5,6 +5,7 @@ SEO Tracker Multi-Sites - Version Streamlit
 
 import os
 import io
+import time
 import streamlit as st
 import pandas as pd
 import requests
@@ -21,6 +22,7 @@ load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
 # Configuration
 LANGUAGE_CODE = os.getenv("DEFAULT_LANGUAGE_CODE", "fr")
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", 10))
+DEFAULT_BATCH_SIZE = 50  # Nombre de mots-clés par lot
 
 # API Endpoints
 API_URL = "https://api.dataforseo.com/v3/serp/google/organic/live/regular"
@@ -49,13 +51,19 @@ def extract_domain(url_or_domain):
     return domain
 
 
-def get_search_volumes(keywords, headers, location_code):
-    """Récupère les volumes de recherche pour une liste de mots-clés."""
-    volumes = {kw: None for kw in keywords}
+def split_into_batches(items, batch_size):
+    """Divise une liste en lots de taille batch_size."""
+    for i in range(0, len(items), batch_size):
+        yield items[i:i + batch_size]
+
+
+def get_search_volumes_batch(keywords_batch, headers, location_code):
+    """Récupère les volumes de recherche pour un lot de mots-clés."""
+    volumes = {}
 
     payload = [
         {
-            "keywords": keywords,
+            "keywords": keywords_batch,
             "location_code": location_code,
             "language_code": LANGUAGE_CODE,
         }
@@ -83,6 +91,21 @@ def get_search_volumes(keywords, headers, location_code):
         pass
 
     return volumes
+
+
+def get_search_volumes(keywords, headers, location_code, status_text=None):
+    """Récupère les volumes de recherche pour tous les mots-clés (par lots de 700)."""
+    all_volumes = {kw: None for kw in keywords}
+    batches = list(split_into_batches(keywords, 700))  # API limite à ~1000, on prend 700 pour la marge
+
+    for i, batch in enumerate(batches):
+        if status_text:
+            status_text.text(f"Récupération des volumes: lot {i+1}/{len(batches)}")
+
+        batch_volumes = get_search_volumes_batch(batch, headers, location_code)
+        all_volumes.update(batch_volumes)
+
+    return all_volumes
 
 
 def get_keyword_positions_multi(keyword, target_domains, headers, location_code):
@@ -125,27 +148,48 @@ def get_keyword_positions_multi(keyword, target_domains, headers, location_code)
         return keyword, results
 
 
-def get_positions_parallel_multi(keywords, target_domains, headers, location_code, progress_bar, status_text):
-    """Recherche les positions en parallèle pour plusieurs domaines."""
+def process_batch_positions(keywords_batch, target_domains, headers, location_code):
+    """Traite un lot de mots-clés en parallèle."""
     results = {}
-    completed = 0
-    total = len(keywords)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {
             executor.submit(get_keyword_positions_multi, kw, target_domains, headers, location_code): kw
-            for kw in keywords
+            for kw in keywords_batch
         }
 
         for future in as_completed(futures):
             keyword, positions = future.result()
             results[keyword] = positions
-            completed += 1
-
-            progress_bar.progress(completed / total)
-            status_text.text(f"Analyse des positions: {completed}/{total} mots-clés")
 
     return results
+
+
+def get_positions_parallel_multi(keywords, target_domains, headers, location_code, batch_size, progress_bar, status_text):
+    """Recherche les positions en parallèle pour plusieurs domaines, par lots."""
+    all_results = {}
+    batches = list(split_into_batches(keywords, batch_size))
+    total_batches = len(batches)
+    total_keywords = len(keywords)
+    completed_keywords = 0
+
+    for batch_idx, batch in enumerate(batches):
+        status_text.text(f"Lot {batch_idx + 1}/{total_batches} - Analyse de {len(batch)} mots-clés...")
+
+        # Traiter le lot
+        batch_results = process_batch_positions(batch, target_domains, headers, location_code)
+        all_results.update(batch_results)
+
+        # Mettre à jour la progression
+        completed_keywords += len(batch)
+        progress_bar.progress(completed_keywords / total_keywords)
+        status_text.text(f"Lot {batch_idx + 1}/{total_batches} terminé - {completed_keywords}/{total_keywords} mots-clés analysés")
+
+        # Petite pause entre les lots pour éviter le rate limiting
+        if batch_idx < total_batches - 1:
+            time.sleep(0.5)
+
+    return all_results
 
 
 def build_dataframe(keywords, sites, positions_dict, volumes_dict):
@@ -295,6 +339,18 @@ with st.sidebar:
 
     location = st.selectbox("Pays", list(location_codes.keys()), index=0)
 
+    st.divider()
+    st.header("Performance")
+    batch_size = st.slider(
+        "Taille des lots",
+        min_value=10,
+        max_value=200,
+        value=DEFAULT_BATCH_SIZE,
+        step=10,
+        help="Nombre de mots-clés traités par lot. Plus petit = plus stable, plus grand = plus rapide."
+    )
+    st.caption(f"Requêtes parallèles: {MAX_WORKERS}")
+
 # Layout principal en deux colonnes
 col1, col2 = st.columns(2)
 
@@ -341,7 +397,9 @@ if st.button("🚀 Lancer l'analyse", type="primary", use_container_width=True):
         sites = [extract_domain(line.strip()) for line in sites_input.strip().split("\n") if line.strip()]
         keywords = [line.strip() for line in keywords_input.strip().split("\n") if line.strip()]
 
-        st.info(f"Analyse de **{len(keywords)}** mots-clés pour **{len(sites)}** site(s)")
+        # Calculer le nombre de lots
+        num_batches = (len(keywords) + batch_size - 1) // batch_size
+        st.info(f"Analyse de **{len(keywords)}** mots-clés pour **{len(sites)}** site(s) — **{num_batches} lot(s)** de {batch_size} max")
 
         # Afficher les sites
         with st.expander("Sites analysés"):
@@ -359,13 +417,12 @@ if st.button("🚀 Lancer l'analyse", type="primary", use_container_width=True):
         # Récupérer le code de localisation sélectionné
         selected_location_code = location_codes[location]
 
-        # Récupérer les positions
+        # Récupérer les positions (par lots)
         status_text.text("Analyse des positions...")
-        positions_dict = get_positions_parallel_multi(keywords, sites, headers, selected_location_code, progress_bar, status_text)
+        positions_dict = get_positions_parallel_multi(keywords, sites, headers, selected_location_code, batch_size, progress_bar, status_text)
 
-        # Récupérer les volumes
-        status_text.text("Récupération des volumes de recherche...")
-        volumes_dict = get_search_volumes(keywords, headers, selected_location_code)
+        # Récupérer les volumes (par lots)
+        volumes_dict = get_search_volumes(keywords, headers, selected_location_code, status_text)
 
         progress_bar.progress(100)
         status_text.text("Analyse terminée !")
